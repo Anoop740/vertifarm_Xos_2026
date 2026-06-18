@@ -1,0 +1,61 @@
+##############################################################################
+#  Dependabot — automated dependency updates
+#  Updates Python (pip), Node (npm), and GitHub Actions weekly.
+##############################################################################
+version: 2
+
+updates:
+  # Python backend
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - backend
+    groups:
+      fastapi-stack:
+        patterns:
+          - "fastapi*"
+          - "uvicorn*"
+          - "pydantic*"
+          - "sqlalchemy*"
+          - "alembic*"
+      security:
+        patterns:
+          - "python-jose*"
+          - "bcrypt*"
+          - "cryptography*"
+          - "slowapi*"
+
+  # Node frontend
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - frontend
+    groups:
+      react-stack:
+        patterns:
+          - "react*"
+          - "@types/react*"
+          - "vite*"
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - github-actions

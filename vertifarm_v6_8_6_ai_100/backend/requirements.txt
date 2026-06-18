@@ -1,0 +1,47 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+sqlalchemy[asyncio]==2.0.31
+asyncpg==0.29.0
+alembic==1.13.2
+pydantic==2.7.4
+pydantic-settings==2.3.4
+pydantic[email]==2.7.4
+python-jose[cryptography]==3.3.0
+# passlib==1.7.4  # not used - using bcrypt directly
+bcrypt==4.0.1
+python-multipart==0.0.9
+redis[asyncio]==5.0.7
+aiohttp==3.9.5
+httpx==0.27.0
+websockets==12.0
+aiomqtt==2.1.0
+APScheduler==3.10.4
+celery[redis]==5.4.0
+flower==2.0.1
+Pillow==10.4.0
+numpy==2.0.0        # ML engine: Z-score, IQR, linear regression, confidence intervals
+pandas==2.2.2
+# scikit-learn intentionally excluded — all ML algorithms implemented in app/services/ml_engine.py
+# using pure numpy (Z-score, IQR ensemble, linear least-squares, sigmoid growth curve).
+tenacity==8.4.2
+loguru==0.7.2
+rich==13.7.1
+python-dotenv==1.0.1
+email-validator==2.2.0
+stripe==9.12.0
+itsdangerous==2.2.0
+resend==2.0.0
+slowapi==0.1.9
+# ─── Testing ──────────────────────────────────────────────
+pytest==8.2.2
+pytest-asyncio==0.23.8
+anyio[asyncio]==4.4.0
+# Phase 2
+qrcode[pil]==7.4.2
+weasyprint==62.3
+twilio==9.2.3
+sendgrid==6.11.0
+cryptography==42.0.8
+pyotp==2.9.0
+openai==1.35.10
+anthropic==0.29.0

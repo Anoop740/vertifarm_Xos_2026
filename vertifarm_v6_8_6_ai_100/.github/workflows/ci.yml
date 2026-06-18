@@ -1,0 +1,324 @@
+##############################################################################
+#  VertiFarm XOS — CI/CD Pipeline
+#  Runs on every push/PR to main and develop branches.
+#
+#  Jobs:
+#    1. backend-lint    — ruff + mypy static analysis
+#    2. backend-test    — pytest with coverage (SQLite in-memory)
+#    3. frontend-lint   — eslint + tsc type-check
+#    4. frontend-build  — vite production build
+#    5. security-scan   — bandit (Python SAST) + safety (CVE deps)
+#    6. docker-build    — build images to verify Dockerfiles (no push on PRs)
+#    7. deploy-staging  — push to staging (main branch only, manual approval)
+##############################################################################
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  REGISTRY: ghcr.io
+  IMAGE_BACKEND: ${{ github.repository }}/backend
+  IMAGE_FRONTEND: ${{ github.repository }}/frontend
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1. Backend — Lint & Type-check
+  # ──────────────────────────────────────────────────────────────────────────
+  backend-lint:
+    name: "Backend · Lint & Type-check"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff mypy
+          pip install -r requirements.txt
+
+      - name: Ruff lint
+        run: ruff check app/ tests/ --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check app/ tests/
+
+      - name: Mypy type-check (non-blocking)
+        run: mypy app/ --ignore-missing-imports --no-strict-optional
+        continue-on-error: true   # Promote to blocking once stubs are complete
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. Backend — Tests
+  # ──────────────────────────────────────────────────────────────────────────
+  backend-test:
+    name: "Backend · Tests & Coverage"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+      REDIS_URL: "redis://localhost:6379/0"
+      SECRET_KEY: "ci-test-secret-key-not-for-production"
+      ENVIRONMENT: "test"
+      STRIPE_SECRET_KEY: "sk_test_placeholder"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install aiosqlite pytest-cov coverage
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --asyncio-mode=auto \
+            --cov=app \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=50 \
+            -v \
+            --tb=short
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: backend/coverage.xml
+          flags: backend
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 3. Frontend — Lint & Type-check
+  # ──────────────────────────────────────────────────────────────────────────
+  frontend-lint:
+    name: "Frontend · Lint & Type-check"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npx eslint src/ --ext .ts,.tsx --max-warnings 50
+
+      - name: TypeScript type-check
+        run: npx tsc --noEmit
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 4. Frontend — Production Build
+  # ──────────────────────────────────────────────────────────────────────────
+  frontend-build:
+    name: "Frontend · Production Build"
+    runs-on: ubuntu-latest
+    needs: [frontend-lint]
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_API_URL: ""
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 5. Security Scan
+  # ──────────────────────────────────────────────────────────────────────────
+  security-scan:
+    name: "Security · SAST & CVE Scan"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install scanners
+        run: pip install bandit safety pip-audit
+
+      - name: Bandit SAST (Python)
+        run: bandit -r app/ -ll -ii --format json -o bandit-report.json || true
+
+      - name: Safety CVE scan
+        run: |
+          safety check -r requirements.txt \
+            --output text \
+            --ignore 70612 \
+            || echo "::warning::CVE warnings found — review bandit/safety output"
+        continue-on-error: true
+
+      - name: pip-audit
+        run: pip-audit -r requirements.txt --ignore-vuln GHSA-placeholder || true
+        continue-on-error: true
+
+      - name: Upload bandit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report-${{ github.sha }}
+          path: backend/bandit-report.json
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 6. Docker Build (validate Dockerfiles — no push on PRs)
+  # ──────────────────────────────────────────────────────────────────────────
+  docker-build:
+    name: "Docker · Build Images"
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-build]
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (backend)
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_BACKEND }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract metadata (frontend)
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_FRONTEND }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 7. Deploy to Staging (main branch only, requires approval)
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: "Deploy · Staging"
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+
+    steps:
+      - name: Deploy to staging
+        run: |
+          echo "Deploying sha=${{ github.sha }} to staging…"
+          # Replace with your deployment method:
+          # - SSH + docker compose pull && docker compose up -d
+          # - kubectl set image …
+          # - Render/Railway/Fly.io CLI hook
+          echo "::notice::Deployment placeholder — wire up your deploy command here"
