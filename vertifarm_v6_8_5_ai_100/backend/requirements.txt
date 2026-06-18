@@ -19,10 +19,9 @@ APScheduler==3.10.4
 celery[redis]==5.4.0
 flower==2.0.1
 Pillow==10.4.0
-numpy==2.0.0        # ML engine: Z-score, IQR, linear regression, confidence intervals
+numpy==2.0.0
 pandas==2.2.2
-# scikit-learn intentionally excluded — all ML algorithms implemented in app/services/ml_engine.py
-# using pure numpy (Z-score, IQR ensemble, linear least-squares, sigmoid growth curve).
+# scikit-learn removed — not imported anywhere in this codebase (numpy used directly for anomaly scoring)
 tenacity==8.4.2
 loguru==0.7.2
 rich==13.7.1

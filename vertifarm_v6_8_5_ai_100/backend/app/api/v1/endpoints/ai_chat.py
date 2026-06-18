@@ -59,21 +59,11 @@ class ChatRequest(BaseModel):
 
 
 async def _build_context(db: AsyncSession, user: User) -> str:
-    """
-    Build a rich, real farm context string from the DB.
-    Includes: farm/zone counts, active alert details, crop types/stages,
-    and latest sensor readings per zone — so the LLM has actionable data.
-    """
+    """Build a brief real farm context string from the DB."""
     try:
-        from datetime import datetime, timezone, timedelta
-        from sqlalchemy import desc
-        from app.models.models import SensorReading
-
         org_id = user.organization_id
         if not org_id:
             return ""
-
-        # Counts
         farms_count = (await db.execute(
             select(func.count(Farm.id)).where(Farm.organization_id == org_id, Farm.is_active == True)
         )).scalar() or 0
@@ -82,91 +72,31 @@ async def _build_context(db: AsyncSession, user: User) -> str:
                 Zone.farm_id.in_(select(Farm.id).where(Farm.organization_id == org_id))
             )
         )).scalar() or 0
-
-        # Active unresolved alerts (up to 3, with severity + message)
-        alert_rows = (await db.execute(
-            select(Alert.severity, Alert.message)
-            .where(
+        active_alerts = (await db.execute(
+            select(func.count(Alert.id)).where(
                 Alert.is_resolved == False,
                 Alert.farm_id.in_(select(Farm.id).where(Farm.organization_id == org_id))
             )
-            .order_by(desc(Alert.created_at))
-            .limit(3)
-        )).all()
-        active_alerts = len(alert_rows)
-
-        # Active crops (up to 5, with type + stage)
-        crop_rows = (await db.execute(
-            select(Crop.crop_type, Crop.status, Crop.recipe_name)
-            .where(
-                Crop.farm_id.in_(select(Farm.id).where(Farm.organization_id == org_id)),
-                Crop.status.notin_(["harvested"]),
+        )).scalar() or 0
+        active_crops = (await db.execute(
+            select(func.count(Crop.id)).where(
+                Crop.farm_id.in_(select(Farm.id).where(Farm.organization_id == org_id))
             )
-            .limit(5)
-        )).all()
-
-        # Latest sensor readings across zones (last hour, one per type)
-        sensor_rows = (await db.execute(
-            select(SensorReading.sensor_type, SensorReading.value, SensorReading.unit)
-            .where(
-                SensorReading.zone_id.in_(
-                    select(Zone.id).where(
-                        Zone.farm_id.in_(select(Farm.id).where(Farm.organization_id == org_id))
-                    )
-                ),
-                SensorReading.timestamp >= datetime.now(timezone.utc) - timedelta(hours=1),
-            )
-            .order_by(desc(SensorReading.timestamp))
-            .limit(30)
-        )).all()
-
-        # Deduplicate to latest per sensor_type
-        seen: set = set()
-        latest_sensors: list = []
-        for row in sensor_rows:
-            if row.sensor_type not in seen:
-                seen.add(row.sensor_type)
-                unit = row.unit or ""
-                latest_sensors.append(f"{row.sensor_type}={row.value:.2f}{unit}")
-
-        # Build context block
-        lines = [
-            f"\n\n[VertiFarm Live Context — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}]",
-            f"Organisation: {user.organization_id or 'N/A'} | Role: {user.role}",
-            f"Infrastructure: {farms_count} farm(s), {zones_count} zone(s)",
-        ]
-
-        if crop_rows:
-            crop_strs = [
-                f"{c.recipe_name or c.crop_type or 'unknown'} ({c.status or 'active'})"
-                for c in crop_rows
-            ]
-            lines.append(f"Active crops: {', '.join(crop_strs)}")
-
-        if latest_sensors:
-            lines.append(f"Latest sensors: {', '.join(latest_sensors)}")
-        else:
-            lines.append("Latest sensors: no recent readings (last 1h)")
-
-        if alert_rows:
-            alert_strs = [f"{a.severity}: {(a.message or '')[:60]}" for a in alert_rows]
-            lines.append(f"Active alerts ({active_alerts}): {' | '.join(alert_strs)}")
-        else:
-            lines.append("Active alerts: none")
-
-        return "\n".join(lines)
-
-    except Exception as exc:
-        logger.warning("_build_context error: %s", exc)
+        )).scalar() or 0
+        return (
+            f"\n\n[Farm Context: {farms_count} farm(s), {zones_count} zone(s), "
+            f"{active_crops} active crop batches, {active_alerts} unresolved alert(s)]"
+        )
+    except Exception:
         return ""
 
 
-async def _call_openai(messages: list, context: str = "") -> str:
-    """Call OpenAI chat completions. Context already embedded in user message."""
+async def _call_openai(messages: list, context: str) -> str:
+    system = AGRONOMY_SYSTEM_PROMPT + context
     payload = {
         "model": settings.OPENAI_MODEL,
-        "messages": [{"role": "system", "content": AGRONOMY_SYSTEM_PROMPT}] + messages,
-        "max_tokens": 600,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "max_tokens": 500,
         "temperature": 0.3,
     }
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -181,17 +111,18 @@ async def _call_openai(messages: list, context: str = "") -> str:
         return data["choices"][0]["message"]["content"].strip()
 
 
-async def _call_anthropic(messages: list, context: str = "") -> str:
-    """Call Anthropic Messages API. Context already embedded in user message."""
+async def _call_anthropic(messages: list, context: str) -> str:
+    system = AGRONOMY_SYSTEM_PROMPT + context
+    # Convert to Anthropic message format
     anthropic_messages = [
-        {"role": m["role"] if m["role"] in ("user", "assistant") else "user",
+        {"role": m["role"] if m["role"] != "assistant" else "assistant",
          "content": m["content"]}
         for m in messages
     ]
     payload = {
         "model": settings.ANTHROPIC_MODEL,
-        "max_tokens": 600,
-        "system": AGRONOMY_SYSTEM_PROMPT,
+        "max_tokens": 500,
+        "system": system,
         "messages": anthropic_messages,
     }
     async with httpx.AsyncClient(timeout=20.0) as client:

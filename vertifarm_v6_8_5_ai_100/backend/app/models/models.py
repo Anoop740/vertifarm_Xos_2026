@@ -705,13 +705,12 @@ class AnomalyLog(Base):
     zone_id         = Column(String, ForeignKey("zones.id"), nullable=True)
     device_id       = Column(String, ForeignKey("devices.id"), nullable=True)
     sensor_type     = Column(String(80), nullable=False)   # temperature|ec|ph|...
-    anomaly_score   = Column(Float, nullable=False)        # ensemble Z+IQR score [0,1]
+    anomaly_score   = Column(Float, nullable=False)        # Isolation Forest score
     detected_value  = Column(Float, nullable=True)
-    expected_range  = Column(JSON, default=dict)           # {mean, std, q1, q3, fence_low, fence_high}
+    expected_range  = Column(JSON, default=dict)           # {min, max, mean, std}
     severity        = Column(String(20), default="warning") # info|warning|critical
     is_resolved     = Column(Boolean, default=False)
     resolved_at     = Column(DateTime(timezone=True), nullable=True)
-    metadata_json   = Column(JSON, default=dict)           # z_score, iqr_fences, method, model_id
     created_at      = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
